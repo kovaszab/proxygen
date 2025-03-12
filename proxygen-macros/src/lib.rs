@@ -240,9 +240,6 @@ pub fn pre_hook(attr_input: TokenStream, item: TokenStream) -> TokenStream {
             let hook_func_name =
                 syn::parse_str::<syn::Ident>(&format!("Proxygen_PreHook_{}", &func_name)).unwrap();
             TokenStream::from(quote!(
-                #[cfg(not(target_arch = "x86_64"))]
-                compile_error!("Pre-hooks aren't yet implemented for non x86-64");
-
                 #[no_mangle]
                 // TODO: Use the same safety/unsafety modifier as the original here
                 pub unsafe extern "C" fn #hook_func_name() {
@@ -252,47 +249,70 @@ pub fn pre_hook(attr_input: TokenStream, item: TokenStream) -> TokenStream {
 
                 #(#attrs)*
                 pub unsafe extern "C" fn #func_name() {
-                    std::arch::asm!(
-                        // Wait for dll proxy to initialize
-                        "call {wait_dll_proxy_init}",
-                        "mov rax, qword ptr [rip + {ORIG_FUNCS_PTR}]",
-                        "add rax, {orig_index} * 8",
-                        "mov rax, qword ptr [rax]",
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        std::arch::asm!(
+                            // Wait for dll proxy to initialize
+                            "call {wait_dll_proxy_init}",
+                            "mov rax, qword ptr [rip + {ORIG_FUNCS_PTR}]",
+                            "add rax, {orig_index} * 8",
+                            "mov rax, qword ptr [rax]",
 
-                        // Push the original function onto the stack
-                        "push rax",
+                            // Push the original function onto the stack
+                            "push rax",
 
-                        // Save the general purpose registers
-                        "push rdi; push rsi; push rcx; push rdx; push r8; push r9",
+                            // Save the general purpose registers
+                            "push rdi; push rsi; push rcx; push rdx; push r8; push r9",
 
-                        // Save the 128-bit floating point registers
-                        "sub rsp, 64",
-                        "movaps [rsp], xmm0",
-                        "movaps [rsp + 16], xmm1",
-                        "movaps [rsp + 32], xmm2",
-                        "movaps [rsp + 48], xmm3",
+                            // Save the 128-bit floating point registers
+                            "sub rsp, 64",
+                            "movaps [rsp], xmm0",
+                            "movaps [rsp + 16], xmm1",
+                            "movaps [rsp + 32], xmm2",
+                            "movaps [rsp + 48], xmm3",
 
-                        // Call our hook code here
-                        "call {proxygen_pre_hook_func}",
+                            // Call our hook code here
+                            "call {proxygen_pre_hook_func}",
 
-                        // Restore the 128-bit floating point registers
-                        "movaps xmm3, [rsp + 48]",
-                        "movaps xmm2, [rsp + 32]",
-                        "movaps xmm1, [rsp + 16]",
-                        "movaps xmm0, [rsp]",
-                        "add rsp, 64",
+                            // Restore the 128-bit floating point registers
+                            "movaps xmm3, [rsp + 48]",
+                            "movaps xmm2, [rsp + 32]",
+                            "movaps xmm1, [rsp + 16]",
+                            "movaps xmm0, [rsp]",
+                            "add rsp, 64",
 
-                        // Restore the general purpose registers
-                        "pop r9; pop r8; pop rdx; pop rcx; pop rsi; pop rdi",
+                            // Restore the general purpose registers
+                            "pop r9; pop r8; pop rdx; pop rcx; pop rsi; pop rdi",
 
-                        // Return to the original function
-                        "ret",
-                        wait_dll_proxy_init = sym crate::wait_dll_proxy_init,
-                        ORIG_FUNCS_PTR = sym crate::ORIG_FUNCS_PTR,
-                        orig_index = const #orig_index_ident,
-                        proxygen_pre_hook_func = sym #hook_func_name,
-                        options(noreturn)
-                    );
+                            // Return to the original function
+                            "ret",
+                            wait_dll_proxy_init = sym crate::wait_dll_proxy_init,
+                            ORIG_FUNCS_PTR = sym crate::ORIG_FUNCS_PTR,
+                            orig_index = const #orig_index_ident,
+                            proxygen_pre_hook_func = sym #hook_func_name,
+                            options(noreturn)
+                        );
+                    }
+
+                    #[cfg(target_arch = "x86")]
+                    {
+                        std::arch::asm!(
+                            "call {wait_dll_proxy_init}",
+                            "mov eax, dword ptr [{ORIG_FUNCS_PTR}]",  // Removed RIP-relative addressing
+                            "add eax, {orig_index} * 4",
+                            "mov eax, dword ptr [eax]",
+                            "push eax",
+                            "push edi; push esi; push ecx; push edx",
+                            "call {proxygen_pre_hook_func}",
+                            "pop edx; pop ecx; pop esi; pop edi",
+                            "ret",
+                            wait_dll_proxy_init = sym crate::wait_dll_proxy_init,
+                            ORIG_FUNCS_PTR = sym crate::ORIG_FUNCS_PTR,
+                            orig_index = const #orig_index_ident,
+                            proxygen_pre_hook_func = sym #hook_func_name,
+                            options(noreturn)
+                        );
+                    }
                 }
             ))
         }
